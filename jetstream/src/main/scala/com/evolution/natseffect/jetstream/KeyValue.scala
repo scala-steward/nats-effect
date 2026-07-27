@@ -2,10 +2,13 @@ package com.evolution.natseffect.jetstream
 
 import cats.effect.Resource
 import cats.effect.std.QueueSource
+import cats.implicits.*
 import io.nats.client.MessageTtl
 import io.nats.client.api.{KeyValueEntry, KeyValuePurgeOptions, KeyValueStatus}
+import io.nats.client.support.Validator
 
 import scala.concurrent.duration.FiniteDuration
+import scala.util.control.NoStackTrace
 
 /** Key-Value store providing distributed key-value storage with history and watch capabilities.
   *
@@ -463,6 +466,43 @@ trait KeyValue[F[_]] {
     *   effect yielding list of KeyValueEntry representing the history
     */
   def history(key: String, timeout: FiniteDuration): F[List[KeyValueEntry]]
+}
+
+object KeyValue {
+
+  /** Rejection of a key by jnats KV key validation.
+    *
+    * @param key
+    *   the offending key
+    * @param reason
+    *   the jnats validation message
+    */
+  final case class InvalidKeyError(key: String, reason: String) extends RuntimeException(s"Invalid key [$key]: $reason") with NoStackTrace
+
+  /** Validate a key for direct key operations (`put`, `create`, `update`, `get`, `delete`, `purge`, `history`) without touching the server.
+    *
+    * <p>Delegates to jnats: the KV key validator that `put` and `get` run internally, plus the subject-grammar check, so keys that pass the
+    * client precheck but produce an invalid subject on the wire (trailing dot, empty segment) are rejected too. Wildcards `*` and `>` are
+    * rejected.
+    */
+  def validateKey(key: String): Either[InvalidKeyError, Unit] =
+    validate(key)(Validator.validateNonWildcardKvKeyRequired(_))
+
+  /** Validate a key pattern for `watch` and `keys` filters, where the `*` and `>` wildcards are allowed.
+    *
+    * <p>Delegates to the jnats validators, same as [[validateKey]].
+    */
+  def validateKeyWildcardAllowed(key: String): Either[InvalidKeyError, Unit] =
+    validate(key)(Validator.validateKvKeyWildcardAllowedRequired(_))
+
+  private def validate(key: String)(check: String => String): Either[InvalidKeyError, Unit] =
+    Either
+      .catchOnly[IllegalArgumentException] {
+        check(key)
+        Validator.validateSubjectStrict(key, true)
+      }
+      .leftMap(e => InvalidKeyError(key, e.getMessage))
+      .void
 }
 
 /** Result of a [[KeyValue.keysDetailed(timeout* KeyValue.keysDetailed]] call.
