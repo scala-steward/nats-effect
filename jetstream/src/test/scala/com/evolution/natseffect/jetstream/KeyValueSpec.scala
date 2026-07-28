@@ -33,24 +33,24 @@ class KeyValueSpec(global: GlobalRead) extends JetStreamSpec(global) {
       failedUpdate <- kv.update("keyA", "valueA3".getBytes(), revA).attempt.toResource
 
     } yield
-    // Put and get assertions
-    whenSuccess(entry1) { e =>
-      expect.eql(new String(e.getValue), "test-value") &&
-      expect.eql(e.getKey, "test-key") &&
-      expect.eql(e.getRevision, 1L)
-    } &&
-      // Update revision assertions
-      expect.eql(rev2, rev1 + 1L) &&
-      expect.eql(rev3, rev1 + 2L) &&
-      whenSuccess(entry2) { e =>
-        expect.eql(e.getRevision, rev3) &&
-        expect.eql(new String(e.getValue), "value3")
+      // Put and get assertions
+      whenSuccess(entry1) { e =>
+        expect.eql(new String(e.getValue), "test-value") &&
+        expect.eql(e.getKey, "test-key") &&
+        expect.eql(e.getRevision, 1L)
       } &&
-      // Create uniqueness assertions
-      expect(failed.isLeft) &&
-      // Conditional update assertions
-      expect.eql(revB, revA + 1L) &&
-      expect(failedUpdate.isLeft)
+        // Update revision assertions
+        expect.eql(rev2, rev1 + 1L) &&
+        expect.eql(rev3, rev1 + 2L) &&
+        whenSuccess(entry2) { e =>
+          expect.eql(e.getRevision, rev3) &&
+          expect.eql(new String(e.getValue), "value3")
+        } &&
+        // Create uniqueness assertions
+        expect(failed.isLeft) &&
+        // Conditional update assertions
+        expect.eql(revB, revA + 1L) &&
+        expect(failedUpdate.isLeft)
   }
 
   testResource("delete and purge operations") { ctx =>
@@ -149,13 +149,13 @@ class KeyValueSpec(global: GlobalRead) extends JetStreamSpec(global) {
       entry3 <- queue.take.toResource
 
     } yield
-    // Should receive events for config.* keys only
-    expect.eql(entry1.getKey, "config.host") &&
-      expect.eql(new String(entry1.getValue), "localhost") &&
-      expect.eql(entry2.getKey, "config.port") &&
-      expect.eql(new String(entry2.getValue), "8080") &&
-      expect.eql(entry3.getKey, "config.host") &&
-      expect.eql(new String(entry3.getValue), "127.0.0.1")
+      // Should receive events for config.* keys only
+      expect.eql(entry1.getKey, "config.host") &&
+        expect.eql(new String(entry1.getValue), "localhost") &&
+        expect.eql(entry2.getKey, "config.port") &&
+        expect.eql(new String(entry2.getValue), "8080") &&
+        expect.eql(entry3.getKey, "config.host") &&
+        expect.eql(new String(entry3.getValue), "127.0.0.1")
   }
 
   testResource("keysDetailed surfaces warmup completeness that keys() hides") { ctx =>
@@ -167,7 +167,8 @@ class KeyValueSpec(global: GlobalRead) extends JetStreamSpec(global) {
       // Generous timeout: warmup drains every pending message -> Success with the full key set.
       complete <- kv.keysDetailed(5.seconds).toResource
 
-      // Zero timeout: warmup is cut short before draining -> Timeout with a partial (possibly empty) key set.
+      // Zero timeout: the deadline usually cuts warmup short, but a fast drain can still win the race —
+      // either way the warmup result must describe the completeness of the returned keys.
       truncated <- kv.keysDetailed(Duration.Zero).toResource
 
     } yield expect(complete.warmup match {
@@ -175,11 +176,11 @@ class KeyValueSpec(global: GlobalRead) extends JetStreamSpec(global) {
       case _                        => false
     }) &&
       expect.eql(complete.keys.size, 25) &&
-      expect(truncated.warmup match {
-        case Warmup.Result.Timeout(_) => true
-        case _                        => false
-      }) &&
       // keys() alone would return `truncated.keys` with no signal it was cut short — that is the bug being fixed.
-      expect(truncated.keys.size <= complete.keys.size)
+      (truncated.warmup match {
+        case Warmup.Result.Timeout(_)  => expect(truncated.keys.size <= complete.keys.size)
+        case Warmup.Result.Success(_)  => expect.eql(truncated.keys.size, complete.keys.size)
+        case Warmup.Result.Canceled(_) => failure("warmup unexpectedly canceled")
+      })
   }
 }

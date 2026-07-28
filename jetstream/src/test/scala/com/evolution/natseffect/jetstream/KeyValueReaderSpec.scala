@@ -68,13 +68,49 @@ class KeyValueReaderSpec(global: GlobalRead) extends JetStreamSpec(global) {
       )(poll = 100.millis, timeout = 3.seconds).toResource
 
     } yield
-    // Only filtered keys are cached
-    expect.eql(cachedKeys, Set("config.db.host", "config.db.port")) &&
-      // Cached values are retrievable
+      // Only filtered keys are cached
+      expect.eql(cachedKeys, Set("config.db.host", "config.db.port")) &&
+        // Cached values are retrievable
+        expect.eql(hostValue.map(new String(_)), Some("localhost")) &&
+        expect.eql(portValue.map(new String(_)), Some("5432")) &&
+        // Non-filtered keys return None
+        expect(apiValue.isEmpty) &&
+        expect(uiValue.isEmpty)
+  }
+
+  testResource("KeyValueReader with paced watch caches matching keys and updates") { ctx =>
+    for {
+      (js, kv, bucketName) <- setupKeyValueBucket(ctx)
+
+      _ <- kv.put("config.db.host", "localhost".getBytes()).toResource
+      _ <- kv.put("config.db.port", "5432".getBytes()).toResource
+      _ <- kv.put("feature.new-ui", "enabled".getBytes()).toResource
+
+      // Create reader on the paced watch engine
+      kvReader <- KeyValueReader.makePaced[IO](
+        js,
+        bucketName,
+        keyFilters = Set("config.db.*"),
+        warmupTimeout = 5.seconds
+      )
+
+      cachedKeys <- kvReader.keys.toResource
+
+      hostValue <- kvReader.get("config.db.host").toResource
+      uiValue   <- kvReader.get("feature.new-ui").toResource
+
+      // Update a cached key
+      _ <- kv.put("config.db.host", "127.0.0.1".getBytes()).toResource
+
+      // Cache updates with new values
+      _ <- expectEventually(
+        kvReader
+          .get("config.db.host")
+          .map(exists(_)(value => expect.eql("127.0.0.1", new String(value))))
+      )(poll = 100.millis, timeout = 3.seconds).toResource
+
+    } yield expect.eql(cachedKeys, Set("config.db.host", "config.db.port")) &&
       expect.eql(hostValue.map(new String(_)), Some("localhost")) &&
-      expect.eql(portValue.map(new String(_)), Some("5432")) &&
-      // Non-filtered keys return None
-      expect(apiValue.isEmpty) &&
       expect(uiValue.isEmpty)
   }
 
@@ -133,13 +169,13 @@ class KeyValueReaderSpec(global: GlobalRead) extends JetStreamSpec(global) {
       oddValue  <- kvReader.get("odd.1").toResource
 
     } yield
-    // Initial state caches even keys
-    expect.eql(initialKeys, Set("even.2", "even.4", "even.6")) &&
-      // After update, caches odd keys
-      expect.eql(updatedKeys, Set("odd.1", "odd.3", "odd.5")) &&
-      // Even keys are no longer cached
-      expect(evenValue.isEmpty) &&
-      // Odd keys are now cached
-      expect.eql(oddValue.map(new String(_)), Some("value1"))
+      // Initial state caches even keys
+      expect.eql(initialKeys, Set("even.2", "even.4", "even.6")) &&
+        // After update, caches odd keys
+        expect.eql(updatedKeys, Set("odd.1", "odd.3", "odd.5")) &&
+        // Even keys are no longer cached
+        expect(evenValue.isEmpty) &&
+        // Odd keys are now cached
+        expect.eql(oddValue.map(new String(_)), Some("value1"))
   }
 }

@@ -102,7 +102,7 @@ object Warmup {
     ): F[Unit] =
       warmupResult.tryGet.flatMap {
         case Some(_) => Async[F].unit
-        case None =>
+        case None    =>
           cond.flatMap {
             case true =>
               for {
@@ -115,7 +115,7 @@ object Warmup {
 
     for {
       warmupResult        <- Deferred[F, Result].toResource
-      maybeCompleteWarmup1 = maybeCompleteWarmup(warmupResult)
+      maybeCompleteWarmup1 = maybeCompleteWarmup(warmupResult)(_, _)
 
       warmupStartTime <- Async[F].monotonic.toResource
       timeMeasured     = Async[F].monotonic.map(_ - warmupStartTime)

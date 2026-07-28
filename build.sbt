@@ -1,13 +1,13 @@
 import sbt.Test
 
 lazy val commonSettings = Seq(
-  homepage             := Some(url("https://github.com/evolution-gaming/nats-effect")),
+  homepage             := Some(uri("https://github.com/evolution-gaming/nats-effect")),
   organization         := "com.evolution",
   organizationName     := "Evolution",
-  organizationHomepage := Some(url("https://evolution.com")),
+  organizationHomepage := Some(uri("https://evolution.com")),
   startYear            := Some(2026),
-  licenses             := Seq(("MIT", url("https://opensource.org/licenses/MIT"))),
-  crossScalaVersions   := Seq("2.13.16", "3.3.4"),
+  licenses             := Seq(("MIT", uri("https://opensource.org/licenses/MIT"))),
+  crossScalaVersions   := Seq("2.13.18", "3.3.8"),
   versionScheme        := Some("semver-spec"),
   scalaVersion         := crossScalaVersions.value.head,
   publishTo            := Some(Resolver.evolutionReleases),
@@ -33,7 +33,10 @@ lazy val commonSettings = Seq(
           "-Werror",
           "-deprecation",
           "-feature",
-          "-language:adhocExtensions"
+          "-language:adhocExtensions",
+          // improve error messages:
+          "-explain",
+          "-explain-types"
         )
     }
   }
@@ -46,13 +49,13 @@ lazy val root = project
     name                     := "nats-effect",
     publish / skip           := true,
     Test / parallelExecution := true,
-    addCommandAlias("fmt", "all scalafmtAll scalafmtSbt"),
-    addCommandAlias("check", "all scalafmtCheckAll scalafmtSbtCheck"),
-    addCommandAlias("build", "+all compile test")
+    addCommandAlias("fmt", "all scalafmtRepo"),
+    addCommandAlias("check", "all scalafmtCheckRepo"),
+    addCommandAlias("build", "+all compile testFull")
   )
   .aggregate(core, jetstream, metrics, logback, loadtest)
 
-lazy val core = project.settings(commonSettings).settings(Test / testFrameworks += TestFramework("weaver.framework.CatsEffect"))
+lazy val core = project.settings(commonSettings).settings(Test / testFrameworks += TestFrameworks.WeaverTestCats)
 
 lazy val jetstream = project.settings(commonSettings).dependsOn(core % "compile->compile;test->test")
 
