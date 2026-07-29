@@ -278,6 +278,34 @@ class PacedOrderedConsumerContextSpec(global: GlobalRead) extends JetStreamSpec(
       expect.eql(processed, 1)
   }
 
+  testResource("paced ordered consumer applies the configured inactive threshold") { ctx =>
+    for {
+      (js, streamName, _) <- setupStream(ctx)
+
+      sc <- js.streamContext(streamName).toResource
+
+      defaultOcc <- sc
+        .createOrderedPacedConsumer(
+          new OrderedConsumerConfiguration().deliverPolicy(DeliverPolicy.All)
+        )
+        .toResource
+      defaultSub       <- defaultOcc.consume(_ => IO.unit)
+      defaultThreshold <- defaultSub.getConsumerInfo.map(_.consumerConfiguration.getInactiveThreshold).toResource
+
+      customOcc <- sc
+        .createOrderedPacedConsumer(
+          new OrderedConsumerConfiguration().deliverPolicy(DeliverPolicy.All),
+          PacedConsumerListener.noop[IO],
+          42.seconds
+        )
+        .toResource
+      customSub       <- customOcc.consume(_ => IO.unit)
+      customThreshold <- customSub.getConsumerInfo.map(_.consumerConfiguration.getInactiveThreshold).toResource
+
+    } yield expect(defaultThreshold == java.time.Duration.ofMinutes(5)) &&
+      expect(customThreshold == java.time.Duration.ofSeconds(42))
+  }
+
   private def awaitFinished(subscription: MessageSubscription[IO]): IO[Unit] = {
     def poll: IO[Unit] =
       subscription.isFinished.flatMap {

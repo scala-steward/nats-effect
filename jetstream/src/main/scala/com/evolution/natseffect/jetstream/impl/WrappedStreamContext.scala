@@ -14,6 +14,7 @@ import com.evolution.natseffect.jetstream.{
 import io.nats.client.{JetStreamOptions, PurgeOptions}
 import io.nats.client.api.{ConsumerConfiguration, MessageInfo, OrderedConsumerConfiguration, PurgeResponse, StreamInfoOptions}
 
+import scala.concurrent.duration.FiniteDuration
 import scala.jdk.CollectionConverters.*
 
 private[natseffect] class WrappedStreamContext[F[_]: Async](
@@ -53,9 +54,26 @@ private[natseffect] class WrappedStreamContext[F[_]: Async](
     config: OrderedConsumerConfiguration,
     listener: PacedConsumerListener[F]
   ): F[OrderedConsumerContext[F]] =
+    orderedPacedConsumer(config, listener, None)
+
+  override def createOrderedPacedConsumer(
+    config: OrderedConsumerConfiguration,
+    listener: PacedConsumerListener[F],
+    inactiveThreshold: FiniteDuration
+  ): F[OrderedConsumerContext[F]] =
+    orderedPacedConsumer(config, listener, Some(inactiveThreshold))
+
+  private def orderedPacedConsumer(
+    config: OrderedConsumerConfiguration,
+    listener: PacedConsumerListener[F],
+    inactiveThreshold: Option[FiniteDuration]
+  ): F[OrderedConsumerContext[F]] =
     Async[F]
       .delay((connection.jetStream(jetStreamOptions.orNull), connection.jetStreamManagement(jetStreamOptions.orNull)))
-      .flatMap { case (js, jsm) => PacedConsumerContexts.ordered[F](js, jsm, wrapped.getStreamName, config, connection, listener) }
+      .flatMap {
+        case (js, jsm) =>
+          PacedConsumerContexts.ordered[F](js, jsm, wrapped.getStreamName, config, connection, listener, inactiveThreshold)
+      }
 
   override def getPacedConsumerContext(consumerName: String): F[ConsumerContext[F]] =
     getPacedConsumerContext(consumerName, PacedConsumerListener.noop[F])

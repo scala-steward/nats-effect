@@ -60,7 +60,8 @@ private[natseffect] object PacedConsumerContexts {
     streamName: String,
     configuration: OrderedConsumerConfiguration,
     connection: JConnection,
-    listener: PacedConsumerListener[F]
+    listener: PacedConsumerListener[F],
+    inactiveThreshold: Option[FiniteDuration] = None
   ): F[OrderedConsumerContext[F]] =
     Ref.of[F, OrderedContextState](OrderedContextState.Initial).map { state =>
       new OrderedConsumerContext[F] {
@@ -77,7 +78,7 @@ private[natseffect] object PacedConsumerContexts {
           for {
             _            <- singleConsumeSlot
             subscription <- PacedPullEngine.resource(
-              subscribe = orderedSubscribe(js, streamName, configuration, connection, pullConfig.window, state),
+              subscribe = orderedSubscribe(js, streamName, configuration, connection, pullConfig.window, state, inactiveThreshold),
               consumerInfo = lookupConsumerInfo(jsm, streamName, _),
               config = pullConfig,
               reportError = PacedPullEngine.connectionErrorReporter(connection),
@@ -157,14 +158,15 @@ private[natseffect] object PacedConsumerContexts {
     configuration: OrderedConsumerConfiguration,
     connection: JConnection,
     pullWindow: FiniteDuration,
-    state: Ref[F, OrderedContextState]
+    state: Ref[F, OrderedContextState],
+    inactiveThresholdOverride: Option[FiniteDuration]
   ): Resource[F, ActiveSubscription[F]] = {
 
-    /** Generous enough that an application stall between pulls does not get the consumer reaped; a reaped consumer is recovered by the
-      * liveness probe -> resubscribe path anyway.
+    /** The default is generous enough that an application stall between pulls does not get the consumer reaped; a reaped consumer is
+      * recovered by the liveness probe -> resubscribe path anyway.
       */
     def inactiveThreshold: java.time.Duration =
-      java.time.Duration.ofMillis((pullWindow * 2).max(5.minutes).toMillis)
+      java.time.Duration.ofMillis(inactiveThresholdOverride.getOrElse((pullWindow * 2).max(5.minutes)).toMillis)
 
     /** The ordered-consumer recipe, as jnats `SubscribeOptions` applies it for ordered pull subscriptions, on top of the user's ordered
       * configuration. A restart resumes immediately after the last delivered stream sequence, like the jnats ordered recreate does.

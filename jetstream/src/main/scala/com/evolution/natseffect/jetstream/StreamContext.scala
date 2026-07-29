@@ -3,6 +3,8 @@ package com.evolution.natseffect.jetstream
 import io.nats.client.PurgeOptions
 import io.nats.client.api.{ConsumerConfiguration, MessageInfo, OrderedConsumerConfiguration, PurgeResponse, StreamInfoOptions}
 
+import scala.concurrent.duration.FiniteDuration
+
 /** Stream context providing operations on a specific JetStream stream and its consumers.
   *
   * <p>A StreamContext is bound to a specific stream and provides methods for: <ul> <li>Querying stream information and state <li>Purging
@@ -91,6 +93,19 @@ trait StreamContext[F[_]] {
   def createOrderedPacedConsumer(
     config: OrderedConsumerConfiguration,
     listener: PacedConsumerListener[F]
+  ): F[OrderedConsumerContext[F]]
+
+  /** Variant of [[createOrderedPacedConsumer(config:io\.nats\.client\.api\.OrderedConsumerConfiguration)* createOrderedPacedConsumer]] with
+    * an explicit server-side inactive threshold for the underlying ephemeral consumers, instead of the engine default of max(2 x pull
+    * window, 5 minutes).
+    *
+    * @param inactiveThreshold
+    *   how long the server keeps an inactive ephemeral consumer before deleting it
+    */
+  def createOrderedPacedConsumer(
+    config: OrderedConsumerConfiguration,
+    listener: PacedConsumerListener[F],
+    inactiveThreshold: FiniteDuration
   ): F[OrderedConsumerContext[F]]
 
   /** Get a consumer context for an existing consumer, backed by the processing-paced pull engine (see `PacedPullEngine`).
