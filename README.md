@@ -391,20 +391,23 @@ Different connections are differentiated by a cluster label, which you specify w
 
 ## Load testing
 
-The `loadtest` module contains a runnable harness that reproduces the KV warm-up overload
-(simultaneous watchers against a large bucket on a constrained compute pool) and measures
-consumption: warm-up outcomes, client-side drops, slow-consumer events, consumer recreations,
-liveness lag and peak heap. Results are recorded in [docs/loadtest-results.md](docs/loadtest-results.md).
+The `loadtest` module contains a runnable harness that measures KV consumption on either consume
+engine, in one of two modes. `mode=warmup` (the default) reproduces the KV warm-up overload
+(simultaneous watchers against a large bucket on a constrained compute pool) and measures the
+catch-up: warm-up outcomes, client-side drops, slow-consumer events, consumer recreations, liveness
+lag and peak heap. `mode=steady` measures the post-warmup regime instead: live updates at a
+controlled rate, timed end to end. Results are recorded in
+[docs/loadtest-results.md](docs/loadtest-results.md).
 
-The load test is **manual-only**: it is a plain `main` with no test sources, so CI (`sbt check
-test`) only compiles it and never executes it — a run happens exclusively when someone invokes
-`sbt loadtest/run` locally.
+The load test is **manual-only**: it is a plain `main` with no test sources, so CI only compiles it
+and never executes it — a run happens exclusively when someone invokes `sbt loadtest/run` locally.
 
 Run a scenario (boots an embedded `nats-server`, no external setup needed):
 
 ```bash
 sbt 'loadtest/run scenario=baseline'    # historically: jnats default pending limits (see note below)
 sbt 'loadtest/run scenario=unlimited'   # unlimited pending limits on JS dispatchers (master default since #10)
+sbt 'loadtest/run scenario=paced'       # processing-paced pulls (KeyValue.watchAllPaced)
 ```
 
 All parameters are optional `key=value` arguments with the incident-reproducing defaults:

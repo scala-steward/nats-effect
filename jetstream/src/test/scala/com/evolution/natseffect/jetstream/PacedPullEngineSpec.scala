@@ -209,6 +209,13 @@ object PacedPullEngineSpec extends SimpleIOSuite {
     } yield result
   }
 
+  // If the slack ever reaches the early-terminus threshold, a healthy window would again end (at the server's expiry)
+  // more than EarlyEmptyThreshold before its deadline - the exact condition that arms the guard - and the bug the
+  // slack was added to fix would be back.
+  pureTest("the deadline slack stays below the early-terminus threshold") {
+    expect(PacedPullEngine.DeadlineSlack < PacedPullEngine.EarlyEmptyThreshold)
+  }
+
   test("a deadline firing mid-handler does not interrupt processing") {
     for {
       directives <- Queue.unbounded[IO, Directive]
@@ -218,9 +225,12 @@ object PacedPullEngineSpec extends SimpleIOSuite {
       completed  <- Deferred[IO, Unit]
 
       subscribe = fakeSubscribe(directives, subscribes, pulls)
-      // The handler outlives the 300ms window; without the masked take-to-handle step the
-      // window timeout would cancel it mid-sleep and `completed` would never fire
-      handler = (_: JMessage) => IO.sleep(config.window + 200.millis) *> completed.complete(()).void
+      // The handler outlives the window *and* the deadline slack - i.e. the local deadline fires
+      // while the handler is still sleeping. Without the masked take-to-handle step the window
+      // timeout would cancel it mid-sleep and `completed` would never fire. Derived from the
+      // engine's own constant: a literal here went vacuous when the slack was introduced.
+      handler =
+        (_: JMessage) => IO.sleep(config.window + PacedPullEngine.DeadlineSlack + 200.millis) *> completed.complete(()).void
 
       result <- run(subscribe, handler).use(_ => completed.get.timeout(5.seconds).as(success))
     } yield result

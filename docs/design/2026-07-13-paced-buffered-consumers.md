@@ -88,9 +88,15 @@ permanent configuration errors, while still absorbing transient ones; after the 
 resubscribes retry indefinitely.
 
 `stop` lets the in-flight message finish and the loop exit at the next window boundary; `close`
-is prompt while waiting but also lets an in-flight message finish (the step is masked). A pull
-terminus arriving well before the window deadline is guarded with a 500ms sleep so terminus
-storms cannot re-pull in a hot loop; the guard self-disables for sub-second windows.
+is prompt while waiting but also lets an in-flight message finish (the step is masked). The local
+window deadline is the pull window plus 500ms of slack. The deadline is armed when the pull is
+published, while the server starts the same `expiresIn` clock only when it receives that pull;
+without the slack the client always timed out first, and the server's expiry `408` arrived at the
+head of the *next* window - indistinguishable from a dead consumer answering instantly, which cost
+a guard sleep and a second pull per window on a healthy consumer. A pull terminus arriving more
+than a second before the (slackened) deadline is guarded with a 500ms sleep so terminus storms
+cannot re-pull in a hot loop; the guard self-disables for windows of 500ms or less, where nothing
+can arrive that early.
 
 ## Observability
 
@@ -110,7 +116,8 @@ the jnats connection `ErrorListener`, so existing log wiring works without a cus
 - `PacedOrderedConsumerContextSpec` / `PacedConsumerContextSpec` / `PacedKeyValueSpec` —
   server-backed behavior of the public API: warmup, recovery after consumer deletion, sequential
   continuation, stop, prompt idle release, handler failure, durable ack/redelivery, concurrent
-  consumes, KV watching.
+  consumes, KV watching, and the deadline-slack regression test (an idle consumer issues one pull
+  per window expiry, not two).
 - `PacedStressSpec` — the behavioral bar: 8 watchers x 1500 keys with a slow handler; zero drops,
   zero consumer recreations, strict revision order, pulls bounded by the batch budget.
 
@@ -121,7 +128,8 @@ the jnats connection `ErrorListener`, so existing log wiring works without a cus
   and self-healing; a best-effort `deleteConsumer` on that path is the first productionization
   item.
 - A reconnect voids outstanding pull requests server-side; the loop only notices at the client
-  window deadline, so message flow can stall up to one pull window (default 30s) after a
+  window deadline, so message flow can stall up to one pull window plus the deadline slack
+  (default 30s + 500ms) after a
   reconnect. Shorter `ConsumeOptions.expiresIn` bounds the stall at the cost of more pull
   traffic when idle.
 - Not built: overlapping/prefetch pulls (`ConsumeOptions.thresholdPercent` is accepted and

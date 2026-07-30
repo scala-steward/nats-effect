@@ -45,6 +45,46 @@ sbt 'loadtest/run scenario=paced     watchers=20 keys=18000 valueSize=12288 warm
 Exit codes: 0 = finished (see verdict), 1 = bad args, 2 = watchdog kill (thread dump printed),
 3 = crash. Reproduction of the callback pathology needs the constrained pool (`computeThreads=2`).
 
+## Steady-state results: the paced engine's empty-window latency tail
+
+*Date: 2026-07-30. Produced by the `loadtest` module in `mode=steady`.
+Workload: 16 KV watchers on a small bucket, one update every 5 s for 5 minutes (960 timed
+deliveries per run), zero-cost handler, 4 compute threads, `storage=memory`, publisher on its own
+connection. Apple M3 Max, OpenJDK 21, `-Xms2g -Xmx2g`, embedded nats-server 2.12.1, jnats 2.25.1. The
+warm-up results above are unaffected by this: a backlog-bound drain never observes an idle pull window.*
+
+The measurement that found the bug, and the same measurement after the deadline-slack fix:
+
+| Metric                       | paced, before        | paced, after | callback (reference) |
+|------------------------------|----------------------|--------------|----------------------|
+| latency p50                  | 4.2 ms               | 4.8 ms       | 4.0 ms               |
+| latency p99                  | **438 ms**           | **22.8 ms**  | 15.1 ms              |
+| latency max                  | **501 ms**           | **23.1 ms**  | 18.0 ms              |
+| arrivals > 200 ms            | **16 / 960 (1.67%)** | **0 / 960**  | 0 / 960              |
+| consumer→server msgs / 295 s | 301                  | **160**      | —                    |
+
+`max = 501 ms` against a hard-coded 500 ms `EarlyEmptyGuard` is the signature; the `kv.put` ack on the
+same runs was 8-24 ms, so the delay is on the consume side, not in the write path. The halved pull
+traffic is the independent witness that the *mechanism* went away rather than the symptom being
+suppressed: the engine went from two pull cycles per window to one. `PacedOrderedConsumerContextSpec`
+pins that ratio automatically ("an expired pull costs one new pull, not two": 11 pulls over six
+one-second windows before the fix, 6 after).
+
+Two cautions when reading a run like this. Latency is timed from the `put` call, so a publisher-side
+stall inflates every watcher's sample identically - one callback run showed a 567 ms "tail" that the
+`kv.put` ack column identified as a 566 ms publish, not a consumer effect. And because the fleet
+subscribes simultaneously its pull windows are phase-aligned, so a guard hit appears as exactly
+`watchers` slow samples; consumers that start at different times de-phase, making the effect ~1.7% of
+(update, consumer) pairs rather than 1.7% of updates being late for everyone.
+
+Reproduce with:
+
+```bash
+sbt 'loadtest/run mode=steady scenario=paced watchers=16 keys=200 valueSize=512 updates=60 \
+  periodMs=5000 primeUpdates=200 spinMicros=0 computeThreads=4 storage=memory settleMs=1000 \
+  namePollMs=0 publisherConnection=true warmupTimeoutSec=60 drainTimeoutSec=30'
+```
+
 ## Legacy results (pre-#10 master, 2026-07-14)
 
 Recorded before #10 hardcoded unlimited pending limits into every JetStream dispatcher; the

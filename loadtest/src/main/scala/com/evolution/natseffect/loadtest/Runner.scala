@@ -4,12 +4,12 @@ import cats.effect.{IO, Resource}
 import cats.effect.implicits.*
 import cats.syntax.all.*
 import com.evolution.natseffect.jetstream.{EmbeddedNats, JetStream, KeyValue, KvWatchMode, SubscriptionWithWarmup, Warmup}
-import com.evolution.natseffect.{Nats, Options}
+import com.evolution.natseffect.{Connection, Nats, Options}
 import io.nats.client.api.{KeyValueConfiguration, KeyValueEntry, KeyValueOperation, StorageType}
 
 import java.net.ServerSocket
 import java.util.concurrent.atomic.AtomicLong
-import scala.concurrent.duration.{DurationInt, FiniteDuration}
+import scala.concurrent.duration.{Duration, DurationInt, FiniteDuration}
 
 final case class WatcherOutcome(
   idx: Int,
@@ -40,10 +40,15 @@ object Runner {
 
   def run(config: Config, counters: Counters): IO[RunResult] =
     resources(config, counters).use {
-      case (kv, droppedCount) =>
+      case (kv, connection) =>
+        val droppedCount = connection.statistics.flatMap(_.droppedCount)
         for {
           populateTime <- populate(kv, config)
           _ <- IO.println(s"populated ${config.keys} keys in ${populateTime.toMillis / 1000.0}s, starting ${config.watchers} watchers")
+
+          // Optional quiesce: populate writes the whole bucket at full tilt immediately before t0, so its garbage
+          // and the server's flush would otherwise land inside the measured window.
+          _ <- settle(config)
 
           // droppedCount is cumulative over the connection lifetime; snapshot after populate so the report
           // attributes only consume-phase drops to the watcher burst.
@@ -69,10 +74,12 @@ object Runner {
         )
     }
 
-  /** Embedded real nats-server + one shared connection (as in production) + a fresh KV bucket. Yields the KeyValue client and an effect
-    * reading the connection-wide dropped-message count.
+  /** Embedded real nats-server + one shared connection (as in production) + a fresh KV bucket. Yields the KeyValue client and the
+    * connection itself, whose `statistics` carry the connection-wide dropped-message count and the protocol traffic counters.
+    *
+    * Shared with [[SteadyRunner]] so both modes measure the same setup.
     */
-  private def resources(config: Config, counters: Counters): Resource[IO, (KeyValue[IO], IO[Long])] =
+  private[loadtest] def resources(config: Config, counters: Counters): Resource[IO, (KeyValue[IO], Connection[IO])] =
     for {
       // Fail fast with a readable message when the port is taken - typically an orphaned nats-server from a
       // previous run killed by the watchdog's halt (which skips all finalizers).
@@ -104,13 +111,20 @@ object Runner {
           KeyValueConfiguration
             .builder()
             .name(bucketName)
-            .storageType(StorageType.File)
+            // File is the default (as in production). storage=memory takes the server's fsync out of the measured
+            // loop - lower variance - and, being volatile, cannot leave a bucket behind for the next run to inherit.
+            .storageType(if (config.memoryStorage) StorageType.Memory else StorageType.File)
             .build()
         )
-      )(_ => kvm.delete(bucketName).void)
+      )(_ =>
+        // Best-effort: a run that starved the JetStream control plane (the pathology under test) can leave the
+        // delete unanswered, and a finalizer that raises there would destroy an otherwise complete measurement
+        // before the report is rendered. storage=memory makes the leftover harmless anyway - it dies with the server.
+        kvm.delete(bucketName).timeout(10.seconds).attempt.void
+      )
 
       kv <- js.keyValue(bucketName).toResource
-    } yield (kv, connection.statistics.flatMap(_.droppedCount))
+    } yield (kv, connection)
 
   private def checkPortFree(port: Int): IO[Unit] =
     IO.blocking {
@@ -203,10 +217,13 @@ object Runner {
             sub.subscription.getConsumerName.attempt.flatMap {
               case Right(name) if name != null => names.update(_ + name)
               case _                           => IO.unit
-            } *> IO.sleep(50.millis)
+            } *> IO.sleep(config.namePoll)
           }.foreverM
 
-          pollName.background.surround(sub.warmupLatch.get)
+          // namePollMs=0 turns the poller off: with `watchers` fibers polling at 20 Hz it is itself load on the
+          // compute pool, which matters when the pool is deliberately small. The cost is losing the recreation count.
+          if (config.namePoll > Duration.Zero) pollName.background.surround(sub.warmupLatch.get)
+          else sub.warmupLatch.get
         }
 
       // Exhaustive on purpose: a new scenario must pick its consume engine here or compilation fails
@@ -223,7 +240,13 @@ object Runner {
       }
     }
 
-  private def spin(micros: Int): Unit =
+  /** Shared with [[SteadyRunner]]: no-op unless `settleMs` is set. */
+  private[loadtest] def settle(config: Config): IO[Unit] =
+    (IO.sleep(config.settle) *> IO.delay(System.gc()) *> IO.sleep(config.settle))
+      .whenA(config.settle > Duration.Zero)
+
+  /** Shared with [[SteadyRunner]] so both modes charge the handler the same synthetic per-message cost. */
+  private[loadtest] def spin(micros: Int): Unit =
     if (micros > 0) {
       val deadline = System.nanoTime() + micros * 1000L
       while (System.nanoTime() < deadline) {}

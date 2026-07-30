@@ -60,10 +60,15 @@ object LoadTestApp {
             IORuntimeConfig()
           )
 
+        val measure = config.mode match {
+          case Mode.Warmup => Runner.run(config, counters).map(Report.render)
+          case Mode.Steady => SteadyRunner.run(config, counters).map(SteadyReport.render)
+        }
+
         val program = for {
           _      <- IO.println(s"starting load test: ${config.describe}")
-          result <- Probes.heapSampler(counters).surround(Runner.run(config, counters))
-          _      <- IO.println(Report.render(result))
+          report <- Probes.heapSampler(counters).surround(measure)
+          _      <- IO.println(report)
         } yield ()
 
         val exitCode =

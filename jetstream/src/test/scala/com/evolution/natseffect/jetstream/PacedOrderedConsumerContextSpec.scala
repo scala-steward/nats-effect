@@ -12,6 +12,10 @@ import scala.concurrent.duration.*
 
 class PacedOrderedConsumerContextSpec(global: GlobalRead) extends JetStreamSpec(global) {
 
+  /** Shortest window jnats accepts, so the idle-pull regression test costs seconds rather than minutes. */
+  private val IdleWindow  = 1.second
+  private val IdleWindows = 6
+
   private def readMessage(queue: Queue[IO, JetStreamMessage[IO]]): Resource[IO, (NatsJetStreamMetaData, String)] =
     Resource.eval {
       queue.take.flatMap { msg =>
@@ -276,6 +280,39 @@ class PacedOrderedConsumerContextSpec(global: GlobalRead) extends JetStreamSpec(
       expect.eql(handlerFailures, 1) &&
       expect.eql(resubscribes, 0) &&
       expect.eql(processed, 1)
+  }
+
+  // Regression test for the window-deadline slack (see PacedPullEngine.DeadlineSlack): without it the local deadline always fired before
+  // the server's expiresIn clock, so the server's terminus for the just-expired pull arrived at the head of the *next* window, looked like
+  // an early terminus and tripped the 500ms EarlyEmptyGuard - two pull cycles per window instead of one on a healthy idle consumer, plus up
+  // to 500ms of added latency for anything published during the guard sleep. The pull count is asserted because it is exact; catching the
+  // latency effect would need a publisher racing the guard.
+  testResource("an expired pull costs one new pull, not two") { ctx =>
+    for {
+      (js, streamName, _) <- setupStream(ctx)
+
+      sc       <- js.streamContext(streamName).toResource
+      listener <- CountingPacedListener.make.toResource
+
+      occ <- sc
+        .createOrderedPacedConsumer(
+          new OrderedConsumerConfiguration().deliverPolicy(DeliverPolicy.All),
+          listener
+        )
+        .toResource
+
+      _ <- occ.consume(_ => IO.unit, ConsumeOptions.builder().expiresIn(IdleWindow.toMillis).build())
+      _ <- IO.sleep(IdleWindow * IdleWindows.toLong).toResource
+
+      pulls        <- listener.pulls.toResource
+      resubscribes <- listener.resubscribes.toResource
+      processed    <- listener.processed.toResource
+
+      // The stream is empty and nobody publishes, so every window expires untouched: the engine should have
+      // issued the initial pull plus about one per expiry. Twice that is the pre-fix behaviour.
+    } yield expect(clue(pulls) <= IdleWindows + 2) &&
+      expect.eql(resubscribes, 0) &&
+      expect.eql(processed, 0)
   }
 
   private def awaitFinished(subscription: MessageSubscription[IO]): IO[Unit] = {

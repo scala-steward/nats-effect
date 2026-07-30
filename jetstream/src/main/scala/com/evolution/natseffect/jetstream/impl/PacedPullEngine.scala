@@ -33,8 +33,23 @@ private[natseffect] object PacedPullEngine {
   /** A pull terminus this long before the window deadline (e.g. the consumer is gone) is guarded with a short sleep when nothing was
     * delivered, so terminus storms cannot re-pull in a hot loop.
     */
-  private val EarlyEmptyThreshold = 1.second
-  private val EarlyEmptyGuard     = 500.millis
+  private[natseffect] val EarlyEmptyThreshold = 1.second
+  private val EarlyEmptyGuard                 = 500.millis
+
+  /** Slack on the engine's local window deadline, so that the server's own expiry of a pull is observed *inside* that pull's window.
+    *
+    * The local deadline is armed after the pull request is published, while the server starts the same `expiresIn` clock when it receives
+    * it. Without slack the local deadline therefore always fires first, the window ends on the client's timeout, and the server's `408` for
+    * the pull that just expired arrives at the head of the *next* window - where it is indistinguishable from a terminus arriving a full
+    * window early with nothing delivered, i.e. exactly the shape [[EarlyEmptyGuard]] exists to throttle. The result on a perfectly healthy
+    * consumer was a 500ms non-draining sleep and a redundant second pull, every window, forever.
+    *
+    * Must exceed the round trip to the server and stay below [[EarlyEmptyThreshold]], so that a genuinely early terminus (a deleted
+    * consumer answers immediately) still counts as early and is still throttled.
+    *
+    * Package-visible so tests derive their timings from this constant; a hardcoded copy would silently go vacuous if this value changed.
+    */
+  private[natseffect] val DeadlineSlack = 500.millis
 
   /** Pull pacing parameters; mapped from the same jnats `ConsumeOptions` the callback engine takes. `thresholdPercent` has no equivalent
     * here (it is receipt-paced repull tuning); the idle heartbeat interval is the one jnats derives from the window.
@@ -293,7 +308,7 @@ private[natseffect] object PacedPullEngine {
         unlessStopped[CycleEnd](state)(CycleEnd.Stopped) {
           for {
             _        <- issuePull
-            deadline <- F.monotonic.map(_ + config.window)
+            deadline <- F.monotonic.map(_ + config.window + DeadlineSlack)
             outcome  <- drainWindow(state, active, deadline, remaining = config.batchSize, deliveredAny = false)
             end      <- outcome match {
               case WindowOutcome.Handled     => loop(0)
